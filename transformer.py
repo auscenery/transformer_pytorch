@@ -62,9 +62,7 @@ class SublayerConnection(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, sublayer: nn.Module):
-        # 进入每一层的sublayer之前，先layer normalization操作，然后做其他其他操作，
-        # 比如multi-head attention or ffn operation and so on, 最后进行dropout和
-        #　residual connection add operation
+        # layer normalization && residual connection add operation
         sublayer_x = sublayer(self.norm(x))
         return x+ self.dropout(sublayer_x)
 
@@ -85,7 +83,7 @@ class Encoder(nn.Module):
         """
         for layer in self.layers:
             x = layer(x, mask)
-        return self.norm(x)
+        return self.norm(x) # 最后一层输出的时候再做一次layer normalization
 
 class EncoderLayer(nn.Module):
     """
@@ -119,7 +117,7 @@ class Decoder(nn.Module):
     def forward(self, x, context_memory, src_mask, target_mask):
         for layer in self.layers:
             x = layer(x, context_memory, src_mask, target_mask)
-        return self.norm(x)
+        return self.norm(x) # 最后一层输出的时候再做一次layer normalization
 
 
 class DecoderLayer(nn.Module):
@@ -158,6 +156,10 @@ def compute_attention(query, key, value, mask=None, dropout_layer=None):
     dk = query.size(-1)
     scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(dk)
     if mask is not None:
+        #　由于模型是以batch为单位进行训练的，batch的句长以其中最长的那个句子为准，其他句子要做padding。padding项在计算的过程中如果不处理的话，
+        # 会引入噪音，所以就需要mask，来使padding项不对计算起作用。mask在attention机制中的实现非常简单，就是在softmax之前，
+        # 把padding位置元素加一个极大的负数，强制其softmax后的概率结果为0。
+        # 举个例子，[1,1,1]经过softmax计算后结果约为[0.33,0.33,0.33]，[1,1,-1e9] softmax的计算结果约为[0.5, 0.5,0]。这样就相当于mask掉了数组中的第三项元素。
         scores = scores.masked_fill(mask == 0, -1e9)    # 屏蔽机制，近似表示为负无穷
     p_atten = F.softmax(scores, dim=-1)
     if dropout_layer is not None:
@@ -185,7 +187,9 @@ class MultiHeadedAttention(nn.Module):
             mask = mask.unsqueeze(dim=1) # expand a dimension at dim 1(axis=1)
         nbatches = query.size(0)
 
+        # 多个头通过矢量化计算，变成并行计算，加快速度
         # view function is equal to reshape tensor
+        ## 稍微有些没看懂
         query, key, value = [
             linear_layer(x).view(nbatches, -1, self.header_num, self.dk).transpose(1, 2)
             for linear_layer, x in zip(self.linear_layers, (query, key, value))
@@ -233,6 +237,7 @@ class PositionalEncoding(nn.Module):
         note: 序列上不同位置上的x对应的同一个维度i(0<= i <= d_model)，也就是同一个维度特征i上，才具有线性关系
         sin(a+b) = sin(a)cos(b) + cos(a)sin(b)
         PE(p+k, 2i) = PE(p, 2i)PE(k, 2i+1) + PE(p, 2i+1)PE(k, 2i)
+        另外一个原因是cos,sin的值域在[-1,1]之间，也方便赋值给权重参数
     """
     def __init__(self, d_model, dropout, max_len=5000):
         super(PositionalEncoding, self).__init__()

@@ -23,7 +23,7 @@ def subsequent_mask(size):
         the attention mask shows the position each target word (row) is allowed to look at (column). 
         Words are blocked for attending to future words during training.
     """
-    attention_shape = (1, size, size)   # 加一维，表示masked mutil-head attention, emphasize on multi-head
+    attention_shape = (1, size, size)   # 加一维, 同batch对齐，利用广播机制
     masks = np.triu(np.ones(attention_shape), k=1).astype('uint8')  # k=1表示包含对角线上的元素， 将下三角的元素全部置为0
     return torch.from_numpy(masks) == 0 # 下三角全为True, 上三角全为False
 
@@ -53,7 +53,7 @@ class Batch(object):
     """
     def __init__(self, src, target, pad=0):
         self.src = src
-        self.src_mask = (src != pad).unsqueeze(-2)
+        self.src_mask = (src != pad).unsqueeze(-2)  # padding mask
         # 右移动一个位置
         self.target = target[:, :-1]
         self.target_y = target[:, 1:]
@@ -61,8 +61,8 @@ class Batch(object):
         self.ntokens = (self.target_y != pad).data.sum()
 
     @staticmethod
-    def make_std_mask(target, pad):
-        target_mask = (target != pad).unsqueeze(-2)
+    def make_std_mask(target, pad): # subsquent mask
+        target_mask = (target != pad).unsqueeze(-2) #在第二个位置加一位，表示同sequence_length对齐，利用广播机制
         subseq_mask = Variable(subsequent_mask(target.size(-1)).type_as(target_mask.data))
         target_mask = target_mask & subseq_mask
         return target_mask
@@ -92,6 +92,10 @@ class NoamOptimizer:
 
 class LabelSmoothing(Module):
     def __init__(self, size, padding_idx, smoothing=0.0):
+        """
+            @param: size, 分类的类别大小,
+            @param: padding_idx， pad特殊标记对应的字典下标
+        """
         super(LabelSmoothing, self).__init__()
         self.criterion = KLDivLoss(size_average=False)
         self.padding_idx = padding_idx
@@ -101,9 +105,13 @@ class LabelSmoothing(Module):
         self.true_dist = None
 
     def forward(self, x: torch.Tensor, target: torch.Tensor):
+        """
+            @param: x, 预测的分布
+            @param: target, 真实的分布
+        """
         assert x.size(1) == self.size
         true_dist = x.data.clone()
-        true_dist.fill_(self.smoothing / (self.size - 2))
+        true_dist.fill_(self.smoothing / (self.size - 2)) # 因为有一个下标会置为0， 一个下标会置位置信度，所以减去2
         true_dist.scatter_(1, target.data.unsqueeze(1), self.confidence)
         true_dist[:, self.padding_idx] = 0
         mask = torch.nonzero(target.data == self.padding_idx)
@@ -113,6 +121,9 @@ class LabelSmoothing(Module):
         return self.criterion(x, Variable(true_dist, requires_grad=False))
 
 class SimpleLossCompute:
+    """
+        这里采用criterion_layer的评判标准，默认使用的KL-DIV LOSS
+    """
     def __init__(self, output_layer, criterion_layer, optimizer: NoamOptimizer):
         self.output_layer = output_layer
         self.criterion_layer = criterion_layer
